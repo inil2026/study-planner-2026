@@ -4,6 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>📚 스터디 플래너 · 인일여고</title>
+
+<link rel="manifest" href="./manifest.json">
+<link rel="apple-touch-icon" href="./icon.png">
+<meta name="theme-color" content="#e8734a">
+
 <link href="https://fonts.googleapis.com/css2?family=Gaegu:wght@300;400;700&family=Nanum+Gothic:wght@400;700;800&family=Nanum+Pen+Script&display=swap" rel="stylesheet">
 <script>
 // 선생님의 기존 구글 스프레드시트 주소
@@ -745,6 +750,7 @@ function showErr(id,msg){const el=document.getElementById(id);el.textContent=msg
 function showL(){document.getElementById('loading').style.display='flex';}
 function hideL(){document.getElementById('loading').style.display='none';}
 
+// ... (기존 자바스크립트 코드들)
 // ===== 자동로그인 =====
 async function init(){
   if(localStorage.getItem('spAdm')){await loadMeta();hideL();openAdmin();return;}
@@ -755,6 +761,13 @@ async function init(){
   hideL();document.getElementById('loginPage').style.display='flex';
 }
 init();
+
+// 🌟 서비스 워커 등록 (PWA 앱 설치 활성화) 🌟
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js');
+  });
+}
 </script>
 </body>
 </html>
