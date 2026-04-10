@@ -14,24 +14,61 @@
 // 선생님의 기존 구글 스프레드시트 주소
 const GAS_URL = "https://script.google.com/macros/s/AKfycbxbTfiNqUKMHeHzgBNhMfLZVGDWg_Rxg60bgD2ClSl5SaTegcv6D87tHkLQE2EPpMs/exec";
 
-async function gasReq(action, key, data = null) {
+// ====================================================================
+// 🛡️ 안전한 GAS 통신 레이어 (Race Condition / 데이터 유실 방지)
+// ====================================================================
+
+// 저장 중복 실행 방지를 위한 잠금 플래그
+let _isSaving = false;
+// 저장 대기 큐 (저장 중 새 요청이 오면 여기에 쌓임)
+let _pendingSave = null;
+// debounce 타이머
+let saveTimer = null;
+// 저장 실패 시 재시도 횟수
+const MAX_RETRY = 3;
+// 네트워크 타임아웃 (ms)
+const FETCH_TIMEOUT = 15000;
+
+async function gasReq(action, key, data = null, retryCount = 0) {
   try {
     const fd = new URLSearchParams();
     fd.append('action', action);
     fd.append('key', key);
     if(data) fd.append('data', JSON.stringify(data));
 
-    const res = await fetch(GAS_URL, { method: 'POST', body: fd });
-    const text = await res.text(); 
+    // ✅ 타임아웃 적용 (네트워크 무한 대기 방지)
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+
+    let res;
+    try {
+      res = await fetch(GAS_URL, { method: 'POST', body: fd, signal: controller.signal });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    const text = await res.text();
     try {
       const json = JSON.parse(text);
-      if (json.error) { if(action === 'getAll') alert("🚨 관리자 조회 에러:\n" + json.error); return null; }
+      if (json.error) {
+        if(action === 'getAll') alert("🚨 관리자 조회 에러:\n" + json.error);
+        return null;
+      }
       return json.success ? (json.data || true) : null;
     } catch(e) {
       if (action === 'getAll') alert("🚨 관리자 데이터 에러!\n앱스 스크립트 '새 버전' 배포가 누락되었습니다.");
       return null;
     }
-  } catch(e) { return null; }
+  } catch(e) {
+    // ✅ 저장 실패 시 자동 재시도 (최대 MAX_RETRY회)
+    if (action === 'set' && retryCount < MAX_RETRY) {
+      console.warn(`[플래너] 저장 실패, ${retryCount + 1}회 재시도 중...`, e);
+      await new Promise(r => setTimeout(r, 1000 * (retryCount + 1))); // 지수 백오프
+      return gasReq(action, key, data, retryCount + 1);
+    }
+    console.error('[플래너] GAS 통신 오류:', e);
+    return null;
+  }
 }
 
 async function fbGet(id) { return await gasReq('get', id); }
@@ -485,7 +522,7 @@ const SMAP={'참잘했어':{e:'🌟',t:'참 잘했어요!'},'잘했어':{e:'👍
 let CU=null, curDate=dk(new Date()), calMon=new Date(), ttSubj='erase', curStamp='', curEmo='';
 let userDays={}, pinMap={}, admPw='admin123';
 let ddayName='', ddayDate=''; // D-Day 전역 변수
-let saveTimer=null;
+// saveTimer는 상단 통신 레이어에서 선언됨
 let selCls='전체', allPlanners={};
 
 function dk(d){return `${d.getFullYear()}-${p2(d.getMonth()+1)}-${p2(d.getDate())}`;}
@@ -507,7 +544,77 @@ async function saveMeta(){
   await fbMerge('meta',{pins:pinMap, adminPw:admPw, ddayName:ddayName, ddayDate:ddayDate, roster:ROSTER});
 }
 async function loadUser(key){const d=await fbGet('u_'+key);userDays=d?d.days||{}:{};return userDays;}
-async function saveUser(){if(!CU)return;clearTimeout(saveTimer);saveTimer=setTimeout(async()=>{await fbSet('u_'+CU.key,{days:userDays});},800);}
+
+// ✅ Race Condition 완전 방지: 뮤텍스(mutex) 기반 안전한 저장 함수
+async function saveUser() {
+  if (!CU) return;
+
+  // debounce: 연속 입력 중에는 타이머를 계속 리셋
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => _flushSave(), 800);
+}
+
+async function _flushSave() {
+  if (!CU) return;
+
+  // 현재 저장 중이면, 이 데이터를 "대기 저장"으로 등록하고 리턴
+  if (_isSaving) {
+    _pendingSave = JSON.parse(JSON.stringify(userDays)); // 깊은 복사로 스냅샷 저장
+    return;
+  }
+
+  _isSaving = true;
+  _showSaveIndicator('saving');
+
+  try {
+    const dataSnapshot = JSON.parse(JSON.stringify(userDays)); // 저장 시점 스냅샷
+    const result = await fbSet('u_' + CU.key, { days: dataSnapshot });
+
+    if (result) {
+      _showSaveIndicator('ok');
+    } else {
+      _showSaveIndicator('fail');
+      console.error('[플래너] 저장 실패 - 스프레드시트 응답 없음');
+    }
+  } catch(e) {
+    _showSaveIndicator('fail');
+    console.error('[플래너] 저장 오류:', e);
+  } finally {
+    _isSaving = false;
+
+    // 저장 완료 후, 대기 중인 저장이 있으면 즉시 실행
+    if (_pendingSave) {
+      userDays = _pendingSave;
+      _pendingSave = null;
+      await _flushSave();
+    }
+  }
+}
+
+// 저장 상태 표시 (우상단 인디케이터)
+let _saveIndicatorTimer = null;
+function _showSaveIndicator(state) {
+  let el = document.getElementById('_saveIndicator');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = '_saveIndicator';
+    el.style.cssText = 'position:fixed;top:10px;right:10px;z-index:9998;padding:5px 11px;border-radius:18px;font-size:11px;font-weight:700;transition:opacity 0.3s;pointer-events:none;';
+    document.body.appendChild(el);
+  }
+  clearTimeout(_saveIndicatorTimer);
+  if (state === 'saving') {
+    el.textContent = '💾 저장 중...';
+    el.style.background = '#fff9e0'; el.style.color = '#b08000'; el.style.border = '1px solid #f0d060'; el.style.opacity = '1';
+  } else if (state === 'ok') {
+    el.textContent = '✅ 저장됨';
+    el.style.background = '#e8f5e8'; el.style.color = '#2a7a2a'; el.style.border = '1px solid #80c880'; el.style.opacity = '1';
+    _saveIndicatorTimer = setTimeout(() => { el.style.opacity = '0'; }, 2000);
+  } else if (state === 'fail') {
+    el.textContent = '⚠️ 저장 실패! 다시 시도 중...';
+    el.style.background = '#fee'; el.style.color = '#c00'; el.style.border = '1px solid #fcc'; el.style.opacity = '1';
+    _saveIndicatorTimer = setTimeout(() => { el.style.opacity = '0'; }, 4000);
+  }
+}
 
 // ===== 로그인 =====
 function swLTab(t,btn){document.querySelectorAll('.ltab').forEach(b=>b.classList.remove('on'));btn.classList.add('on');document.getElementById('stuForm').style.display=t==='stu'?'block':'none';document.getElementById('admForm').style.display=t==='adm'?'block':'none';}
