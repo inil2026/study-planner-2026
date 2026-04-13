@@ -543,22 +543,66 @@ async function loadMeta(){
 async function saveMeta(){
   await fbMerge('meta',{pins:pinMap, adminPw:admPw, ddayName:ddayName, ddayDate:ddayDate, roster:ROSTER});
 }
-async function loadUser(key){const d=await fbGet('u_'+key);userDays=d?d.days||{}:{};return userDays;}
-
 // ✅ Race Condition 완전 방지: 뮤텍스(mutex) 기반 안전한 저장 함수
 async function saveUser() {
   if (!CU) return;
-
-  // debounce: 연속 입력 중에는 타이머를 계속 리셋
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => _flushSave(), 800);
 }
 
+async function _flushSave() {
+  if (!CU) return;
+
+  // 저장 중이면 대기 큐에 등록 후 리턴
+  if (_isSaving) {
+    _pendingSave = JSON.parse(JSON.stringify(userDays));
+    return;
+  }
+
+  _isSaving = true;
+  _showSaveIndicator('saving');
+
+  // ✅ 저장 전 로컬스토리지 백업 (네트워크 실패 대비)
+  const backupKey = 'backup_' + CU.key;
+  try {
+    localStorage.setItem(backupKey, JSON.stringify({
+      data: JSON.parse(JSON.stringify(userDays)),
+      ts: Date.now()
+    }));
+  } catch(e) {}
+
+  try {
+    const dataSnapshot = JSON.parse(JSON.stringify(userDays));
+    const result = await fbSet('u_' + CU.key, { days: dataSnapshot });
+
+    if (result) {
+      // ✅ 저장 성공 시 백업 삭제
+      localStorage.removeItem(backupKey);
+      _showSaveIndicator('ok');
+    } else {
+      _showSaveIndicator('fail');
+      console.error('[플래너] 저장 실패 - 로컬 백업 유지됨');
+    }
+  } catch(e) {
+    _showSaveIndicator('fail');
+    console.error('[플래너] 저장 오류:', e);
+  } finally {
+    _isSaving = false;
+    // 대기 중인 저장이 있으면 즉시 실행
+    if (_pendingSave) {
+      userDays = _pendingSave;
+      _pendingSave = null;
+      await _flushSave();
+    }
+  }
+}
+
+// ✅ loadUser: 서버 데이터 + 로컬 백업 병합 (중복 선언 제거)
 async function loadUser(key) {
   const d = await fbGet('u_' + key);
   let serverDays = d ? d.days || {} : {};
 
-  // ✅ 로컬 백업이 있으면 서버 데이터와 병합 (더 최신 날짜 우선)
+  // 로컬 백업이 있으면 서버 데이터와 병합 (저장은 하지 않음)
   const backupKey = 'backup_' + key;
   try {
     const backup = localStorage.getItem(backupKey);
@@ -566,13 +610,10 @@ async function loadUser(key) {
       const { data: backupData, ts } = JSON.parse(backup);
       // 1시간 이내 백업만 유효
       if (Date.now() - ts < 3600000 && backupData && backupData.days) {
-        console.log('[플래너] 로컬 백업 발견 - 서버와 병합');
-        // 백업 날짜 데이터를 서버 데이터에 병합 (백업 우선)
+        console.log('[플래너] 로컬 백업 발견 - 병합');
         serverDays = Object.assign({}, serverDays, backupData.days);
-        // 병합 데이터를 서버에 즉시 재업로드
-        await fbSet('u_' + key, { days: serverDays });
         localStorage.removeItem(backupKey);
-        console.log('[플래너] 백업 복구 완료');
+        // 여기서 fbSet 호출 안 함 → openApp의 saveUser()가 처리
       } else {
         localStorage.removeItem(backupKey);
       }
@@ -683,6 +724,7 @@ function openApp(){
   document.getElementById('nvCls').textContent=CU.cls;
   curDate=today();
   updHdr();loadPlan();buildTT();buildCal();
+  saveUser(); // ✅ 로컬 백업 데이터 있으면 서버에 즉시 반영
 }
 function openAdmin(){
   document.getElementById('loginPage').style.display='none';
