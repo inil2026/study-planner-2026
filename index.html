@@ -528,6 +528,8 @@ let selCls='전체', allPlanners={};
 function dk(d){return `${d.getFullYear()}-${p2(d.getMonth()+1)}-${p2(d.getDate())}`;}
 function p2(n){return String(n).padStart(2,'0');}
 function today(){return dk(new Date());}
+// ✅ [보안] XSS 방지: 사용자 입력값을 innerHTML에 삽입 전 항상 이스케이프
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 
 // ===== 통신 및 로드 =====
 async function loadMeta(){
@@ -554,8 +556,10 @@ async function loadUser(key) {
     if (backup) {
       const { data: backupData, ts } = JSON.parse(backup);
       if (Date.now() - ts < 3600000 && backupData && backupData.days) {
-        console.log('[플래너] 로컬 백업 병합');
-        serverDays = Object.assign({}, serverDays, backupData.days);
+        console.log('[플래너] 로컬 백업 병합 (서버 우선)');
+        // ✅ [버그수정] 순서 반전: 서버 데이터가 항상 우선, 백업은 서버에 없는 날짜만 복구
+        // 기존: Object.assign({}, serverDays, backupData.days) → 오래된 백업이 최신 서버를 덮어씌워 데이터 유실
+        serverDays = Object.assign({}, backupData.days, serverDays);
         localStorage.removeItem(backupKey);
       } else {
         localStorage.removeItem(backupKey);
@@ -721,7 +725,9 @@ function openApp(){
   document.getElementById('nvCls').textContent=CU.cls;
   curDate=today();
   updHdr();loadPlan();buildTT();buildCal();
-  saveUser(); // ✅ 로컬 백업 데이터 있으면 서버에 즉시 반영
+  // ✅ [버그수정] 로그인 직후 즉시 저장 제거
+  // 기존 saveUser() 즉시 호출 → 백업 병합 후 오염 데이터가 서버에 바로 덮어씌워지는 문제
+  // 학생이 실제로 입력할 때만 저장됨 (addTask, saveFld, paintC 등)
 }
 function openAdmin(){
   document.getElementById('loginPage').style.display='none';
@@ -789,7 +795,8 @@ function togTask(i){const d=getPD(curDate);d.tasks[i].done=!d.tasks[i].done;rend
 function delTask(i){const d=getPD(curDate);d.tasks.splice(i,1);renderTasks(d.tasks);updMis(d.tasks);saveUser();}
 function renderTasks(tasks){
   const ul=document.getElementById('tList');ul.innerHTML='';
-  tasks.forEach((t,i)=>{const r=document.createElement('div');r.className='trow';r.innerHTML=`<div class="tchk ${t.done?'d':''}" onclick="togTask(${i})">${t.done?'✓':''}</div><span class="tsub s${t.subj}">${t.subj}</span><span class="tname ${t.done?'d':''}">${t.name}</span><button class="tdel" onclick="delTask(${i})">🗑</button>`;ul.appendChild(r);});
+  // ✅ [보안] t.name, t.subj XSS 이스케이프 적용
+  tasks.forEach((t,i)=>{const r=document.createElement('div');r.className='trow';r.innerHTML=`<div class="tchk ${t.done?'d':''}" onclick="togTask(${i})">${t.done?'✓':''}</div><span class="tsub s${esc(t.subj)}">${esc(t.subj)}</span><span class="tname ${t.done?'d':''}">${esc(t.name)}</span><button class="tdel" onclick="delTask(${i})">🗑</button>`;ul.appendChild(r);});
   const done=tasks.filter(t=>t.done).length;
   document.getElementById('dc').textContent=done;document.getElementById('tc').textContent=tasks.length;
 }
@@ -854,12 +861,12 @@ function showDet(ds){
   const si=dd.stamp&&SMAP[dd.stamp]?SMAP[dd.stamp]:{e:'',t:''};
   const det=document.getElementById('cDet');
   det.innerHTML=`<div class="ddet"><div class="ddet-title">📅 ${ds}</div>
-    <div class="dl"><div class="dl-label">목표</div><div style="font-size:13px;">${dd.goal||'(없음)'}</div></div>
-    <div class="dl"><div class="dl-label">할 일 (${done}/${tasks.length})</div>${tasks.map(t=>`<div class="dtask"><span>${t.done?'✅':'⬜'}</span>${t.name}</div>`).join('')||'(없음)'}</div>
+    <div class="dl"><div class="dl-label">목표</div><div style="font-size:13px;">${esc(dd.goal)||'(없음)'}</div></div>
+    <div class="dl"><div class="dl-label">할 일 (${done}/${tasks.length})</div>${tasks.map(t=>`<div class="dtask"><span>${t.done?'✅':'⬜'}</span>${esc(t.name)}</div>`).join('')||'(없음)'}</div>
     <div class="dl"><div class="dl-label">미션 ${dd.missionDone?'✅완료':'❌미완료'}</div></div>
-    <div class="dl"><div class="dl-label">자기평가</div><div style="font-size:20px;">${si.e} ${si.t||'(없음)'}</div></div>
-    <div class="dl"><div class="dl-label">감정</div><div style="font-size:20px;">${dd.emotion||'(없음)'}</div></div>
-    <div class="dl"><div class="dl-label">일기</div><div style="font-size:13px;line-height:1.7;">${dd.diary||'(없음)'}</div></div>
+    <div class="dl"><div class="dl-label">자기평가</div><div style="font-size:20px;">${si.e} ${esc(si.t)||'(없음)'}</div></div>
+    <div class="dl"><div class="dl-label">감정</div><div style="font-size:20px;">${esc(dd.emotion)||'(없음)'}</div></div>
+    <div class="dl"><div class="dl-label">일기</div><div style="font-size:13px;line-height:1.7;">${esc(dd.diary)||'(없음)'}</div></div>
     ${ds===today()?`<button class="badd" style="width:100%;margin-top:8px;" onclick="swTab('p')">오늘 플래너로 →</button>`:''}
   </div>`;
   det.style.display='block';det.scrollIntoView({behavior:'smooth'});
@@ -947,17 +954,15 @@ function printModal() { document.body.classList.add('print-m'); window.print(); 
 function renderRosterList() {
   const cls = document.getElementById('mngCls').value;
   const list = ROSTER[cls] || [];
-  
-  // 번호순으로 정렬
   list.sort((a, b) => a.no - b.no);
-  
-  document.getElementById('rosterTb').innerHTML = list.map((s, idx) => `
+  // ✅ [버그수정] idx 대신 s.no 전달 - 정렬 후 idx가 원본 배열과 달라 엉뚱한 학생 삭제/수정되던 문제 수정
+  document.getElementById('rosterTb').innerHTML = list.map((s) => `
     <tr>
       <td style="text-align:center;">${s.no}</td>
-      <td><strong>${s.name}</strong></td>
+      <td><strong>${esc(s.name)}</strong></td>
       <td style="text-align:center; display:flex; gap:5px; justify-content:center;">
-        <button class="cfb" style="padding:4px 8px; font-size:11px;" onclick="editStudent('${cls}', ${idx})">수정</button>
-        <button class="cfb" style="padding:4px 8px; font-size:11px; background:#fee; border-color:#fcc; color:#c00;" onclick="deleteStudent('${cls}', ${idx})">삭제</button>
+        <button class="cfb" style="padding:4px 8px; font-size:11px;" onclick="editStudent('${cls}', ${s.no})">수정</button>
+        <button class="cfb" style="padding:4px 8px; font-size:11px; background:#fee; border-color:#fcc; color:#c00;" onclick="deleteStudent('${cls}', ${s.no})">삭제</button>
       </td>
     </tr>
   `).join('');
@@ -973,7 +978,6 @@ async function addStudent() {
   const name = prompt(`[${cls} ${no}번] 추가할 학생의 이름을 입력하세요.`);
   if(!name) return;
   
-  // 중복 번호 검사
   if(ROSTER[cls].find(s => s.no == no)) {
     return alert('이미 존재하는 출석번호입니다!');
   }
@@ -981,15 +985,16 @@ async function addStudent() {
   showL();
   ROSTER[cls].push({ no: parseInt(no), name: name.trim() });
   await saveMeta();
-  renderRosterList(); // 표 새로고침
-  
-  // 대시보드(전체현황) 등 기존 데이터들도 새로고침 되도록 반영
+  renderRosterList();
   loadAdmData(); 
   hideL();
   alert('학생이 성공적으로 추가되었습니다!');
 }
 
-async function editStudent(cls, idx) {
+async function editStudent(cls, no) {
+  // ✅ [버그수정] idx → no 기반으로 학생 찾기
+  const idx = ROSTER[cls].findIndex(s => s.no === no);
+  if(idx === -1) return alert('학생을 찾을 수 없습니다.');
   const student = ROSTER[cls][idx];
   const newName = prompt(`[${cls} ${student.no}번] 학생의 새로운 이름을 입력하세요.`, student.name);
   
@@ -1004,7 +1009,10 @@ async function editStudent(cls, idx) {
   alert('이름이 수정되었습니다.');
 }
 
-async function deleteStudent(cls, idx) {
+async function deleteStudent(cls, no) {
+  // ✅ [버그수정] idx → no 기반으로 학생 찾기
+  const idx = ROSTER[cls].findIndex(s => s.no === no);
+  if(idx === -1) return alert('학생을 찾을 수 없습니다.');
   const student = ROSTER[cls][idx];
   if(!confirm(`정말 [${cls} ${student.no}번 ${student.name}] 학생을 삭제하시겠습니까?\n\n※ 주의: 삭제 시 관리자 화면 목록에서 사라지며 복구할 수 없습니다.`)) return;
 
