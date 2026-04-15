@@ -1,5 +1,5 @@
 // ✅ 버전 올릴 때마다 숫자만 바꾸세요 (v5 → v6 → v7...)
-const CACHE_NAME = 'inil-planner-v6';
+const CACHE_NAME = 'inil-planner-v7';
 const ASSETS_TO_CACHE = [
   './index.html',
   './icon.png',
